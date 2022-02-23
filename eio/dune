@@ -1,0 +1,4 @@
+(library
+ (name utcp_eio)
+ (public_name utcp.eio)
+ (libraries utcp eio tcpip mirage-random mirage-time mirage-clock))

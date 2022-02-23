@@ -1,36 +1,36 @@
-open Lwt.Infix
 
 module Ethernet = Ethernet.Make(Netif)
-module ARP = Arp.Make(Ethernet)(OS.Time)
+module ARP = Arp.Make(Ethernet)
 module IPv4 = Static_ipv4.Make(Mirage_random_test)(Mclock)(Ethernet)(ARP)
 
-let log_err ~pp_error = function
+let log_err = function
   | Ok _ -> ()
-  | Error e -> Logs.err (fun m -> m "error %a" pp_error e)
+  | Error e -> Logs.err (fun m -> m "error %a" Error.pp (Error.head e))
 
 let handle_data ip =
-  Lwt_list.iter_s (function
+  List.iter (function
       | Ipaddr.V4 _src, Ipaddr.V4 dst, out ->
-        IPv4.write ip dst `TCP (fun _ -> 0) [ out ] >|=
-        log_err ~pp_error:IPv4.pp_error
+        IPv4.write ip dst `TCP (fun _ -> 0) [ out ] |>
+        log_err
       | Ipaddr.V6 _, Ipaddr.V6 _, _ ->
-        Lwt.return (Logs.err (fun m -> m "IPv6 not supported at the moment"))
+        Logs.err (fun m -> m "IPv6 not supported at the moment")
       | _ -> invalid_arg "bad sportsmanship")
 
 let cb ~proto ~src ~dst payload =
   Logs.app (fun m -> m "received proto %X frame %a -> %a (%d bytes)" proto
-               Ipaddr.V4.pp src Ipaddr.V4.pp dst (Cstruct.length payload));
-  Lwt.return_unit
+               Ipaddr.V4.pp src Ipaddr.V4.pp dst (Cstruct.length payload))
 
 let jump () =
   Printexc.record_backtrace true;
   Mirage_random_test.initialize ();
-  Lwt_main.run (
-    Netif.connect "tap2" >>= fun tap ->
-    Ethernet.connect tap >>= fun eth ->
-    ARP.connect eth >>= fun arp ->
-    let cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.42.2/24" in
-    IPv4.connect ~cidr eth arp >>= fun ip ->
+  begin
+  Eio_linux.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+    let tap = Netif.connect ~sw "tap0" in
+    let eth = Ethernet.connect tap in
+    let arp = ARP.connect ~sw eth (Eio.Stdenv.clock env) in
+    let cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.0.10/24" in
+    let ip = IPv4.connect ~cidr eth arp in
     let tcp (*, clo, out *) =
       (* let dst = Ipaddr.(V4 (V4.of_string_exn "10.0.42.1")) in *)
       let init (*, conn, out *) =
@@ -40,10 +40,21 @@ let jump () =
         s'
       in
       let s = ref init in
+      let () = 
+        let rec loop () =
+          let s', _drops, outs = Utcp.timer !s (Mtime_clock.now ()) in
+          s := s' ;
+          Eio.Std.Fibre.fork ~sw (fun () -> handle_data ip outs);
+          Eio.Time.sleep (Eio.Stdenv.clock env) 0.1;
+          loop ()
+        in
+        Eio.Std.Fibre.fork ~sw loop
+      (*
       let _ = Lwt_engine.on_timer 0.1 true (fun _ ->
           let s', _drops, outs = Utcp.timer !s (Mtime_clock.now ()) in
           s := s' ;
           Lwt.async (fun () -> handle_data ip outs))
+      in*)
       in
       (fun ~src ~dst payload ->
          let src = Ipaddr.V4 src and dst = Ipaddr.V4 dst in
@@ -67,7 +78,7 @@ let jump () =
       Ethernet.input eth
         ~arpv4:(ARP.input arp)
         ~ipv4:(IPv4.input ip ~tcp ~udp:(cb ~proto:17) ~default:cb)
-        ~ipv6:(fun _ -> Lwt.return_unit)
+        ~ipv6:(fun _ -> ())
     in
     (* delay client a bit to have arp up and running *)
 (*    Lwt.async (fun () ->
@@ -76,9 +87,10 @@ let jump () =
         Lwt_unix.sleep 1. >|= fun () ->
         Logs.info (fun m -> m "closing!!");
         clo ()); *)
-    Netif.listen tap ~header_size:14 eth_input >|=
-    Result.map_error (fun e -> `Msg (Fmt.to_to_string Netif.pp_error e))
-  )
+    Netif.listen tap ~header_size:14 eth_input |> log_err
+    end;
+    Ok ()
+  
 
 let setup_log style_renderer level =
   Fmt_tty.setup_std_outputs ?style_renderer ();
