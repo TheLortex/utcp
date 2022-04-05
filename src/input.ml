@@ -644,7 +644,7 @@ let di3_datastuff_really now the_ststuff conn seg _bsd_fast_path ourfinisacked f
     Cstruct.sub data_trimmed_left 0 (min cb.rcv_wnd (Cstruct.length data_trimmed_left))
   in
   let fin_trimmed =
-    if data_trimmed_left_right = data_trimmed_left then
+    if Cstruct.equal data_trimmed_left_right data_trimmed_left then
       fin
     else
       false
@@ -810,6 +810,7 @@ let di3_datastuff_really now the_ststuff conn seg _bsd_fast_path ourfinisacked f
 let di3_datastuff now the_ststuff conn seg ourfinisacked fin ack =
   let cb = conn.control_block in
   let win = seg.Segment.window lsl cb.snd_scale in
+  Printf.printf "WIN: %d\n%!" win;
   (*: Various things do not happen if BSD processes the segment using its header
      prediction (fast-path) code. Header prediction occurs only in the
      [[ESTABLISHED]] state, with segments that have only [[ACK]] and/or [[PSH]]
@@ -959,7 +960,8 @@ let handle_noconn t now id seg =
     (* TODO check RFC 1122 Section 4.2.2.13 whether this actually happens (socket reusage) *)
     (* TODO resource management: limit number of outstanding connection attempts *)
     let conn, reply = deliver_in_1 t.rng now id seg in
-    { t with connections = CM.add id conn t.connections }, Some reply
+    Hashtbl.replace t.connections id conn;
+    t, Some reply
   | true, false ->
     (* deliver_in_1b *)
     let out =
@@ -978,10 +980,12 @@ let handle_conn t now id conn seg =
   Log.debug (fun m -> m "%a handle_conn %a@ seg %a" Connection.pp id pp_conn_state conn Segment.pp seg);
   let add conn' =
     Log.debug (fun m -> m "%a now %a" Connection.pp id pp_conn_state conn');
-    { t with connections = CM.add id conn' t.connections }
+    Hashtbl.replace  t.connections id conn';
+    t
   and drop () =
     Log.debug (fun m -> m "%a dropped" Connection.pp id);
-    { t with connections = CM.remove id t.connections }
+    Hashtbl.remove t.connections id;
+    t
   in
   let r = match conn.tcp_state with
     | Syn_sent ->
@@ -1044,7 +1048,7 @@ let handle_conn t now id conn seg =
 
 let handle_segment t now id seg =
   Log.info (fun m -> m "%a TCP %a" Connection.pp id Segment.pp seg) ;
-  let t', out = match CM.find_opt id t.connections with
+  let t', out = match Hashtbl.find_opt t.connections id with
     | None -> handle_noconn t now id seg
     | Some conn -> handle_conn t now id conn seg
   in
@@ -1058,13 +1062,13 @@ let handle_buf t now ~src ~dst data =
   | Ok (seg, id) ->
     (* deliver_in_3a deliver_in_4 are done now! *)
     let was_established =
-      match CM.find_opt id t.connections with
+      match Hashtbl.find_opt t.connections id with
       | None -> false
       | Some s -> s.tcp_state = Established
     in
     let t', out = handle_segment t now id seg in
     let is_established, received =
-      match CM.find_opt id t'.connections with
+      match Hashtbl.find_opt t'.connections id with
       | None -> false, false
       | Some s ->
         s.tcp_state = Established,

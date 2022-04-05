@@ -235,7 +235,7 @@ module Connection = struct
 end
 
 (* in this we store Connection.t -> state *)
-module CM = Map.Make(Connection)
+module CM = Hashtbl (*Map.Make(Connection)*)
 
 (* maybe timer information should go in here?
    -- put into tcp_state (allowing SYN_SENT (and closing states) to be slimmer)?
@@ -269,16 +269,16 @@ module IS = Set.Make(struct type t = int let compare = compare_int end)
 type t = {
   rng : int -> Cstruct.t ;
   listeners : IS.t ;
-  connections : conn_state CM.t
+  connections : (Connection.t, conn_state) CM.t
 }
 
 let pp ppf t =
   Fmt.pf ppf ":istener %a, connections: %a"
     Fmt.(list ~sep:(any ", ") int) (IS.elements t.listeners)
     Fmt.(list ~sep:(any "@.") (pair ~sep:(any ": ") Connection.pp pp_conn_state))
-    (CM.bindings t.connections)
+    (CM.to_seq t.connections |> List.of_seq)
 
 let start_listen t port = { t with listeners = IS.add port t.listeners }
 let stop_listen t port = { t with listeners = IS.remove port t.listeners }
 
-let empty rng = { rng ; listeners = IS.empty ; connections = CM.empty }
+let empty rng = { rng ; listeners = IS.empty ; connections = Hashtbl.create 0 }

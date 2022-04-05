@@ -38,11 +38,11 @@ let connect ~src ?src_port ~dst ~dst_port t now =
   in
   let _, _, seg = Segment.make_syn conn.control_block id in
   let data = Segment.encode_and_checksum ~src ~dst seg in
-  let connections =
+  let () =
     Log.debug (fun m -> m "%a active open %a" Connection.pp id pp_conn_state conn);
-    CM.add id conn t.connections
+    Hashtbl.replace t.connections id conn
   in
-  { t with connections }, id, (src, dst, data)
+  t, id, (src, dst, data)
 
 (* it occurs that all these functions below are not well suited for sending out
    segments, a tcp_output(_really) will for sure help *)
@@ -51,7 +51,7 @@ let connect ~src ?src_port ~dst ~dst_port t now =
 
 (* in real, this is shutdown `readwrite (close_2) - and we do this in any state *)
 let close t id =
-  match CM.find_opt id t.connections with
+  match Hashtbl.find_opt t.connections id  with
   | None -> Error (`Msg "no connection")
   | Some conn ->
     let* () =
@@ -62,10 +62,11 @@ let close t id =
       let cantsndmore = true and cantrcvmore = true and rcvq = Cstruct.empty in
       { conn with control_block; cantsndmore; cantrcvmore; rcvq }
     in
-    Ok { t with connections = CM.add id conn' t.connections }
+    Hashtbl.replace t.connections id conn';
+    Ok t
 
 let send t id buf =
-  match CM.find_opt id t.connections with
+  match Hashtbl.find_opt t.connections id with
   | None -> Error (`Msg "no connection")
   | Some conn ->
     let* () =
@@ -76,10 +77,11 @@ let send t id buf =
     in
     let sndq = Cstruct.append conn.sndq buf in
     let conn' = { conn with sndq } in
-    Ok { t with connections = CM.add id conn' t.connections }
+    Hashtbl.replace t.connections id conn';
+    Ok t
 
 let recv t id =
-  match CM.find_opt id t.connections with
+  match Hashtbl.find_opt t.connections id with
   | None -> Error (`Msg "no connection")
   | Some conn ->
     let* () =
@@ -88,4 +90,5 @@ let recv t id =
     let* () = guard (not conn.cantrcvmore) (`Msg "cant recv, EOF") in
     let rcvq = conn.rcvq in
     let conn' = { conn with rcvq = Cstruct.empty } in
-    Ok ({ t with connections = CM.add id conn' t.connections }, rcvq)
+    Hashtbl.replace t.connections id conn';
+    Ok (t, rcvq)

@@ -8,8 +8,6 @@ val stop_listen : state -> int -> state
 
 type flow
 
-module FM : Map.S with type key = flow
-
 val pp_flow : flow Fmt.t
 
 val peers : flow -> (Ipaddr.t * int) * (Ipaddr.t * int)
@@ -30,6 +28,8 @@ val close : state -> flow -> (state, [ `Msg of string ]) result
 val recv : state -> flow -> (state * Cstruct.t, [ `Msg of string ]) result
 
 val send : state -> flow -> Cstruct.t -> (state, [ `Msg of string ]) result
+
+module FM : module type of Hashtbl
 
 module Sequence : sig
   type t
@@ -167,11 +167,12 @@ module State : sig
   val conn_state : rcvbufsize:int -> sndbufsize:int -> tcp_state ->
     control_block -> conn_state
   module IS : Set.S with type elt = int
-  module CM : Map.S with type key = flow
+  module CM : module type of Hashtbl
+
   type t = {
     rng : int -> Cstruct.t ;
     listeners : IS.t ;
-    connections : conn_state CM.t
+    connections : (flow, conn_state) CM.t
   }
   val pp : t Fmt.t
   val empty : (int -> Cstruct.t) -> t

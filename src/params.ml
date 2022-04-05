@@ -47,7 +47,7 @@ and tcptv_twtrunc = 8
 and tcp_lingertime = Duration.of_min 2
 and tcp_maxrxtshift = 12
 and tcp_synackmaxrxtshift = 3
-and tcptv_delack = Duration.of_ms 100
+and tcptv_delack = Duration.of_ms 0
 and tcptv_rttvarbase = 0L
 
 let tcp_rtt_invalidate = tcp_maxrxtshift / 4

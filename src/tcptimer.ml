@@ -103,25 +103,30 @@ let timer_tt_delack now id conn =
   Segment.tcp_output_really now id false conn
 
 let fast_timer t now =
-  let connections, out =
-    CM.fold (fun id conn (acc, outs) ->
+  let out =
+    Hashtbl.fold (fun id conn outs ->
         match conn.control_block.tt_delack with
-        | None -> CM.add id conn acc, outs
+        | None -> Hashtbl.replace t.connections id conn; outs
         | Some timer -> match Timers.timer_expired now timer with
-          | None -> CM.add id conn acc, outs
+          | None -> Hashtbl.replace t.connections id conn; outs
           | Some () ->
             let c', out = timer_tt_delack now id conn in
-            CM.add id c' acc, out :: outs)
-      t.connections (CM.empty, [])
+            Hashtbl.replace t.connections id c'; 
+            out :: outs)
+      t.connections []
   in
-  { t with connections }, [], out
+  t, [], out
+
+
 
 let slow_timer t now =
-  let connections, drops, outs =
-    CM.fold (fun id conn (acc, drops, outs) ->
+  let drops, outs =
+    Hashtbl.fold (fun id conn (drops, outs) ->
         let maybe_out = function
           | None -> outs
-          | Some out -> out :: outs
+          | Some out -> 
+            (Logs.err (fun f -> f "OUTSLOW");
+            out :: outs)
         and expired x = match x with
           | None -> None
           | Some timer -> Timers.timer_expired now timer
@@ -159,11 +164,11 @@ let slow_timer t now =
         in
         let out = maybe_out out_opt in
         match r with
-        | None -> acc, id :: drops, out
-        | Some c -> CM.add id c acc, drops, out)
-      t.connections (CM.empty, [], [])
+        | None -> id :: drops, out
+        | Some c -> Hashtbl.replace t.connections id c; drops, out)
+      t.connections ([], [])
   in
-  { t with connections }, drops, outs
+  t, drops, outs
 
 let ctr = ref 0
 
@@ -175,6 +180,16 @@ let timer t now =
     else if !ctr mod 5 = 0 then slow_timer t now
     else t, [], []
   in
+  let segs =
+    List.map (fun (src, dst, seg) ->
+        src, dst, Segment.encode_and_checksum ~src ~dst seg)
+      outs
+  in
+  t, drops, segs
+
+let fast_timer t now =
+  incr ctr ;
+  let t, drops, outs = fast_timer t now in
   let segs =
     List.map (fun (src, dst, seg) ->
         src, dst, Segment.encode_and_checksum ~src ~dst seg)

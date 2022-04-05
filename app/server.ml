@@ -44,11 +44,11 @@ let jump () =
         let rec loop () =
           let s', _drops, outs = Utcp.timer !s (Mtime_clock.now ()) in
           s := s' ;
-          Eio.Std.Fibre.fork ~sw (fun () -> handle_data ip outs);
+          Eio.Std.Fiber.fork ~sw (fun () -> handle_data ip outs);
           Eio.Time.sleep (Eio.Stdenv.clock env) 0.1;
           loop ()
         in
-        Eio.Std.Fibre.fork ~sw loop
+        Eio.Std.Fiber.fork ~sw loop
       (*
       let _ = Lwt_engine.on_timer 0.1 true (fun _ ->
           let s', _drops, outs = Utcp.timer !s (Mtime_clock.now ()) in

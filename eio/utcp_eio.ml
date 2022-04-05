@@ -24,23 +24,18 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
   type t = {
     mutable tcp : Utcp.state ;
     ip : W.t ;
-    mutable waiting : (unit, [ `Msg of string ]) result Promise.u Utcp.FM.t ;
-    mutable listeners : (flow -> unit) Port_map.t ;
+    mutable waiting : (Utcp.flow, (unit, [ `Msg of string ]) result Promise.u) Utcp.FM.t ;
+    mutable listeners : (<Eio.Flow.two_way; Eio.Flow.close> -> unit) Port_map.t ;
     sw : Switch.t;
   }
   and flow = t * Utcp.flow
 
-  let dst (_t, flow) =
-    let _, (dst, dst_port) = Utcp.peers flow in
-    let dst = W.to_ipaddr dst in
-    dst, dst_port
+  type Error.t += Refused | Timeout
 
   let close t flow =
     match Utcp.close t.tcp flow with
     | Ok tcp -> t.tcp <- tcp
     | Error `Msg msg -> Log.err (fun m -> m "error in close: %s" msg)
-
-  type Error.t += Refused | Timeout
 
   let rec read (t, flow) =
     match Utcp.recv t.tcp flow with
@@ -48,9 +43,9 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
       t.tcp <- tcp ;
       if Cstruct.length data = 0 then
         let (promise, resolver) = Promise.create () in
-        t.waiting <- Utcp.FM.add flow resolver t.waiting;
+        Utcp.FM.add t.waiting flow resolver;
         Promise.await promise |> ignore; (* ?? *)
-        t.waiting <- Utcp.FM.remove flow t.waiting;
+        Utcp.FM.remove t.waiting flow;
         read (t, flow)
       else
         (Ok (`Data data))
@@ -62,16 +57,61 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
 
   let write (t, flow) buf =
     match Utcp.send t.tcp flow buf with
-    | Ok tcp -> t.tcp <- tcp ; (Ok ())
+    | Ok tcp -> 
+      t.tcp <- tcp ; 
+      (Ok ())
     | Error `Msg msg ->
       close t flow;
       Log.err (fun m -> m "error while write %s" msg);
       (* TODO better error *)
       Error.v ~__POS__ Refused
 
-  let writev flow bufs = write flow (Cstruct.concat bufs)
+  type _ Eio.Generic.ty += Flow : flow Eio.Generic.ty
 
-  let close (t, flow) = close t flow 
+  let chunk_cs = Cstruct.create 10000 
+
+  class flow_obj (flow : flow) =
+    object (_ : < Eio.Flow.source ; Eio.Flow.sink ; .. >)
+    
+      method probe : type a. a Eio.Generic.ty -> a option =
+        function Flow -> Some flow | _ -> None
+
+      method copy (src : #Eio.Flow.source) =
+        try
+          while true do
+            let got = Eio.Flow.read src chunk_cs in
+            match write flow (Cstruct.sub chunk_cs 0 got) with
+            | Ok () -> ()
+            | Error _e -> ()
+          done
+        with End_of_file -> ()
+
+      method read_into buf =
+        match read flow with
+        | Ok (`Data buffer) ->
+            Cstruct.blit buffer 0 buf 0 (Cstruct.length buffer);
+            let len = Cstruct.length buffer in
+            len
+        | Ok `Eof -> raise End_of_file
+        | Error _ -> raise End_of_file
+
+      method read_methods = []
+
+      method shutdown (_ : [ `All | `Receive | `Send ]) =
+        Printf.printf "SHUTDOWN.\n%!";
+        let (t, flow) = flow in
+        close t flow
+
+      method close = 
+        let (t, flow) = flow in
+        close t flow
+    end
+
+
+  let dst (_t, flow) =
+    let _, (dst, dst_port) = Utcp.peers flow in
+    let dst = W.to_ipaddr dst in
+    dst, dst_port
 
   let write_nodelay flow buf = write flow buf
 
@@ -91,11 +131,11 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
       Error.v Refused
     | Ok () ->
       let (promise, resolver) = Promise.create () in
-      t.waiting <- Utcp.FM.add id resolver t.waiting;
+      Utcp.FM.add t.waiting id resolver;
       let r = Promise.await promise in
-      t.waiting <- Utcp.FM.remove id t.waiting;
+      Utcp.FM.remove t.waiting id;
       match r with
-      | Ok () -> Ok (t, id)
+      | Ok () -> Ok (new flow_obj (t, id))
       | Error `Msg msg ->
         Log.err (fun m -> m "error establishing connection: %s" msg);
         (* TODO better error *)
@@ -106,7 +146,7 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
     let tcp, ev, data = Utcp.handle_buf t.tcp (now ()) ~src ~dst data in
     t.tcp <- tcp;
     let find ?f ctx id r =
-      match Utcp.FM.find_opt id t.waiting with
+      match Utcp.FM.find_opt t.waiting id with
       | Some c -> Promise.resolve c r
       | None -> match f with
         | Some f -> f ()
@@ -124,7 +164,7 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
                              Utcp.pp_flow id ctx)
               | Some cb ->
                 (* NOTE we start an asynchronous task with the callback *)
-                Fibre.fork ~sw:t.sw (fun () -> cb (t, id))
+                Fiber.fork ~sw:t.sw (fun () -> cb (new flow_obj (t, id)))
             in
             find ~f ctx id (Ok ())
           | `Drop id -> find "drop" id (Error (`Msg "dropped"))
@@ -134,17 +174,17 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
     let out_ign t s = 
       ignore (output_ip t s) 
     in
-    Fibre.all (Option.to_list data |> List.map (fun s () -> out_ign t s))
+    Fiber.all (Option.to_list data |> List.map (fun s () -> out_ign t s))
 
   let connect ~sw ~clock ip =
     let tcp = Utcp.empty R.generate in
-    let t = { tcp ; ip ; waiting = Utcp.FM.empty ; listeners = Port_map.empty; sw } in
-    Fibre.fork ~sw (fun () ->
+    let t = { tcp ; ip ; waiting = Hashtbl.create 12 ; listeners = Port_map.empty; sw } in
+    Fiber.fork ~sw (fun () ->
         let timer () =
           let tcp, drops, outs = Utcp.timer t.tcp (now ()) in
           t.tcp <- tcp;
           List.iter (fun id ->
-              match Utcp.FM.find_opt id t.waiting with
+              match Utcp.FM.find_opt t.waiting id with
               | None -> Log.warn (fun m -> m "%a not found in waiting"
                                      Utcp.pp_flow id)
               | Some c ->
@@ -154,12 +194,16 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
           let out_ign t s = 
             ignore (output_ip t s) 
           in
-          Fibre.all (outs |> List.map (fun s () -> out_ign t s))
+          Printf.printf "out: %d\n%!" (List.length outs);
+          Fiber.all (outs |> List.map (fun s () -> out_ign t s))
         and timeout () =
           Eio.Time.sleep clock 0.1
         in
         let rec go () =
-          Fibre.all [ timer ; timeout ];
+          Fiber.all [ 
+            timer ; 
+            timeout ;
+          ];
           go ()
         in
         go ());
