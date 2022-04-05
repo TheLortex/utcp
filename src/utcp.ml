@@ -19,8 +19,6 @@ type output = Ipaddr.t * Ipaddr.t * Cstruct.t
 
 let timer = Tcptimer.timer
 
-let fast_timer = Tcptimer.fast_timer
-
 let handle_buf = Input.handle_buf
 
 let connect = User.connect

@@ -66,15 +66,13 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
       (* TODO better error *)
       Error.v ~__POS__ Refused
 
-  type _ Eio.Generic.ty += Flow : flow Eio.Generic.ty
-
   let chunk_cs = Cstruct.create 10000 
 
   class flow_obj (flow : flow) =
     object (_ : < Eio.Flow.source ; Eio.Flow.sink ; .. >)
     
       method probe : type a. a Eio.Generic.ty -> a option =
-        function Flow -> Some flow | _ -> None
+        function | _ -> None
 
       method copy (src : #Eio.Flow.source) =
         try
@@ -107,15 +105,6 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
         close t flow
     end
 
-
-  let dst (_t, flow) =
-    let _, (dst, dst_port) = Utcp.peers flow in
-    let dst = W.to_ipaddr dst in
-    dst, dst_port
-
-  let write_nodelay flow buf = write flow buf
-
-  let writev_nodelay flow bufs = write flow (Cstruct.concat bufs)
 
   let output_ip t (src, dst, seg) =
     W.write t.ip ~src:(W.to_ipaddr src) (W.to_ipaddr dst)
