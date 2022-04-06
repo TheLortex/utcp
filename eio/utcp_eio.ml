@@ -183,8 +183,7 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
           let out_ign t s = 
             ignore (output_ip t s) 
           in
-          Printf.printf "out: %d\n%!" (List.length outs);
-          Fiber.all (outs |> List.map (fun s () -> out_ign t s))
+          Fiber.fork ~sw (fun () -> List.iter (out_ign t) outs)
         and timeout () =
           Eio.Time.sleep clock 0.1
         in

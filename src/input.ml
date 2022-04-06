@@ -810,7 +810,6 @@ let di3_datastuff_really now the_ststuff conn seg _bsd_fast_path ourfinisacked f
 let di3_datastuff now the_ststuff conn seg ourfinisacked fin ack =
   let cb = conn.control_block in
   let win = seg.Segment.window lsl cb.snd_scale in
-  Printf.printf "WIN: %d\n%!" win;
   (*: Various things do not happen if BSD processes the segment using its header
      prediction (fast-path) code. Header prediction occurs only in the
      [[ESTABLISHED]] state, with segments that have only [[ACK]] and/or [[PSH]]
@@ -1047,7 +1046,7 @@ let handle_conn t now id conn seg =
     drop (), dropwithreset id seg
 
 let handle_segment t now id seg =
-  Log.info (fun m -> m "%a TCP %a" Connection.pp id Segment.pp seg) ;
+  Log.debug (fun m -> m "%a TCP %a" Connection.pp id Segment.pp seg) ;
   let t', out = match Hashtbl.find_opt t.connections id with
     | None -> handle_noconn t now id seg
     | Some conn -> handle_conn t now id conn seg
@@ -1083,10 +1082,10 @@ let handle_buf t now ~src ~dst data =
     in
     match out with
     | None ->
-      Log.info (fun m -> m "no answer");
+      Log.debug (fun m -> m "no answer");
       t', ev, None
     | Some (src', dst', d) ->
-      Log.info (fun m -> m "answer %a" Segment.pp d);
+      Log.debug (fun m -> m "answer %a" Segment.pp d);
       let src, _, dst, _ = id in
       if Ipaddr.compare src' src <> 0 then
         Log.err (fun m -> m "bad IP reply src' %a vs src %a"
