@@ -20,15 +20,17 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
       let compare (a : int) (b : int) = compare a b
     end)
 
-    
+  type dst = <dst: ipaddr * int>
+
   type t = {
     mutable tcp : Utcp.state ;
     ip : W.t ;
     mutable waiting : (Utcp.flow, (unit, [ `Msg of string ]) result Promise.u) Utcp.FM.t ;
-    mutable listeners : (<Eio.Flow.two_way; Eio.Flow.close> -> unit) Port_map.t ;
+    mutable listeners : (<Eio.Flow.two_way; Eio.Flow.close; dst> -> unit) Port_map.t ;
     sw : Switch.t;
   }
   and flow = t * Utcp.flow
+    
 
   type Error.t += Refused | Timeout
 
@@ -69,7 +71,7 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
   let chunk_cs = Cstruct.create 10000 
 
   class flow_obj (flow : flow) =
-    object (_ : < Eio.Flow.source ; Eio.Flow.sink ; .. >)
+    object (_ : < Eio.Flow.source ; Eio.Flow.sink ; dst; .. >)
     
       method probe : type a. a Eio.Generic.ty -> a option =
         function | _ -> None
@@ -103,6 +105,11 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
       method close = 
         let (t, flow) = flow in
         close t flow
+
+      method dst = 
+        let (_, flow) = flow in
+        let (_, (dst_ip, dst_port)) = Utcp.peers flow in
+        (W.to_ipaddr dst_ip, dst_port)
     end
 
 
