@@ -32,7 +32,9 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
   and flow = t * Utcp.flow
     
 
-  type Error.t += Refused | Timeout
+  exception Refused 
+  
+  exception Timeout
 
   let close t flow =
     match Utcp.close t.tcp flow with
@@ -50,23 +52,23 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
         Utcp.FM.remove t.waiting flow;
         read (t, flow)
       else
-        (Ok (`Data data))
+        `Data data
     | Error `Msg msg ->
       close t flow;
       Log.err (fun m -> m "error while read %s" msg);
       (* TODO better error *)
-      Error.v ~__POS__ Refused
+      raise Refused
 
   let write (t, flow) buf =
     match Utcp.send t.tcp flow buf with
     | Ok tcp -> 
       t.tcp <- tcp ; 
-      (Ok ())
+      ()
     | Error `Msg msg ->
       close t flow;
       Log.err (fun m -> m "error while write %s" msg);
       (* TODO better error *)
-      Error.v ~__POS__ Refused
+      raise Refused
 
   let chunk_cs = Cstruct.create 10000 
 
@@ -80,20 +82,16 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
         try
           while true do
             let got = Eio.Flow.read src chunk_cs in
-            match write flow (Cstruct.sub chunk_cs 0 got) with
-            | Ok () -> ()
-            | Error _e -> ()
+            write flow (Cstruct.sub chunk_cs 0 got)
           done
         with End_of_file -> ()
 
       method read_into buf =
         match read flow with
-        | Ok (`Data buffer) ->
+        | `Data buffer ->
             Cstruct.blit buffer 0 buf 0 (Cstruct.length buffer);
-            let len = Cstruct.length buffer in
-            len
-        | Ok `Eof -> raise End_of_file
-        | Error _ -> raise End_of_file
+            Cstruct.length buffer
+        | `Eof -> raise End_of_file
 
       method read_methods = []
 
@@ -121,21 +119,22 @@ module Make (R : Mirage_random.S) (Mclock : Mirage_clock.MCLOCK) (Time : Mirage_
     let src = W.of_ipaddr (W.src t.ip ~dst) and dst = W.of_ipaddr dst in
     let tcp, id, seg = Utcp.connect ~src ~dst ~dst_port t.tcp (now ()) in
     t.tcp <- tcp;
-    match output_ip t seg with
-    | Error e ->
-      Log.err (fun m -> m "error sending syn: %a" Error.pp (Error.head e));
-      Error.v Refused
-    | Ok () ->
-      let (promise, resolver) = Promise.create () in
-      Utcp.FM.add t.waiting id resolver;
-      let r = Promise.await promise in
-      Utcp.FM.remove t.waiting id;
-      match r with
-      | Ok () -> Ok (new flow_obj (t, id))
-      | Error `Msg msg ->
-        Log.err (fun m -> m "error establishing connection: %s" msg);
-        (* TODO better error *)
-        Error.v Timeout
+    (try 
+      output_ip t seg 
+    with
+    _ ->
+      Log.err (fun m -> m "error sending syn");
+      raise Refused);
+    let (promise, resolver) = Promise.create () in
+    Utcp.FM.add t.waiting id resolver;
+    let r = Promise.await promise in
+    Utcp.FM.remove t.waiting id;
+    match r with
+    | Ok () -> new flow_obj (t, id)
+    | Error `Msg msg ->
+      Log.err (fun m -> m "error establishing connection: %s" msg);
+      (* TODO better error *)
+      raise Timeout
 
   let input t ~src ~dst data =
     let src = W.of_ipaddr src and dst = W.of_ipaddr dst in

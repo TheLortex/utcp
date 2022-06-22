@@ -3,15 +3,15 @@ module Ethernet = Ethernet.Make(Netif)
 module ARP = Arp.Make(Ethernet)
 module IPv4 = Static_ipv4.Make(Mirage_random_test)(Mclock)(Ethernet)(ARP)
 
-let log_err = function
-  | Ok _ -> ()
-  | Error e -> Logs.err (fun m -> m "error %a" Error.pp (Error.head e))
+let log_err fn = 
+  try fn ()
+  with
+  | e -> Logs.err (fun m -> m "error %s" (Printexc.to_string e))
 
 let handle_data ip =
   List.iter (function
       | Ipaddr.V4 _src, Ipaddr.V4 dst, out ->
-        IPv4.write ip dst `TCP (fun _ -> 0) [ out ] |>
-        log_err
+        log_err (fun () -> IPv4.write ip dst `TCP (fun _ -> 0) [ out ])
       | Ipaddr.V6 _, Ipaddr.V6 _, _ ->
         Logs.err (fun m -> m "IPv6 not supported at the moment")
       | _ -> invalid_arg "bad sportsmanship")
@@ -28,7 +28,7 @@ let jump () =
   Eio.Switch.run @@ fun sw ->
     let tap = Netif.connect ~sw "tap0" in
     let eth = Ethernet.connect tap in
-    let arp = ARP.connect ~sw eth (Eio.Stdenv.clock env) in
+    let arp = ARP.connect ~sw ~clock:(Eio.Stdenv.clock env) eth in
     let cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.0.10/24" in
     let ip = IPv4.connect ~cidr eth arp in
     let tcp (*, clo, out *) =
@@ -87,7 +87,7 @@ let jump () =
         Lwt_unix.sleep 1. >|= fun () ->
         Logs.info (fun m -> m "closing!!");
         clo ()); *)
-    Netif.listen tap ~header_size:14 eth_input |> log_err
+    log_err (fun () -> Netif.listen tap ~header_size:14 eth_input)
     end;
     Ok ()
   
@@ -107,5 +107,7 @@ let setup_log =
 let cmd =
   Term.(term_result (const jump $ setup_log)),
   Term.info "server" ~version:"%%VERSION_NUM%%"
+[@@ocaml.warning "-3"]
 
 let () = match Term.eval cmd with `Ok () -> exit 0 | _ -> exit 1
+[@@ocaml.warning "-3"]
